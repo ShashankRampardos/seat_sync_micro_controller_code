@@ -126,7 +126,10 @@ void loop() {
       float d = measureDistance();
       display.showNumberDec((int)d, false);
       setLED(0, 255, 0); // green
-
+      delay(1000);
+      mqttClient.publish(MQTT_TOPIC,"1");
+      Serial.println("sending 1");
+      delay(500);
       if (d >= 40.0) {
         if (leaveStart == 0) leaveStart = now;
         else if (now - leaveStart >= leaveTimeout) {
@@ -146,7 +149,10 @@ void loop() {
       float d = measureDistance();
       display.showNumberDec((int)d, false);
       setLED(255, 0, 0); // red
-
+      delay(1000);
+      mqttClient.publish(MQTT_TOPIC,"1");
+      Serial.println("sending 0");
+      delay(500);
       if (d >= 40.0) {
         if (leaveStart == 0) leaveStart = now;
         else if (now - leaveStart >= leaveTimeout) {
@@ -162,35 +168,7 @@ void loop() {
       break;
     }
     //here i wanna publish the status in every 6 seconds interval {Available, Occupied_human, Occupied_object}
-    if (now - lastPublishTime >= publishInterval) {
-      lastPublishTime = now;
-
-   // Publish the current state code again every 6 seconds for refreshing app, 
-   //Refresh Rate = 1 publish / 6 seconds
-   //or equivalently
-   //0.1667 Hz (approx)
    
-   switch (state) {
-      case IDLE:
-       mqttClient.publish(MQTT_TOPIC, "0");
-       Serial.println("[Periodic] Status refreshed: IDLE (0)");
-       break;
-
-      case OCCUPIED_HUMAN:
-       mqttClient.publish(MQTT_TOPIC, "1");
-       Serial.println("[Periodic] Status refreshed: OCCUPIED_HUMAN (1)");
-       break;
-
-      case OCCUPIED_OBJECT:
-       mqttClient.publish(MQTT_TOPIC, "2");
-       Serial.println("[Periodic] Status refreshed: OCCUPIED_OBJECT (2)");
-       break;
-     
-//      default:
-//      // Optional: if ever add new states, handle them here
-//      break;
-    }
-   }
   }
 }
 
