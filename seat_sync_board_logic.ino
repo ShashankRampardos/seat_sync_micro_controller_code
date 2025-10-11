@@ -14,8 +14,8 @@
 #define DIO_PIN     21
 
 // Wi-Fi & MQTT
-const char* WIFI_SSID   = "Scutum";
-const char* WIFI_PASS   = "00000111";
+const char* WIFI_SSID   = "Scutum"; //"POCO X6 PRO";
+const char* WIFI_PASS   = "00000111";//"ansh4830";
 const char* MQTT_SERVER = "broker.hivemq.com";
 const int   MQTT_PORT   = 1883;
 const char* MQTT_TOPIC  = "seat/1/status";
@@ -38,6 +38,10 @@ unsigned long stateStart = 0;
 const unsigned long checkInt     = 500;   // ultrasonic check interval
 const unsigned long motionWin    = 10000; // 10 s window for PIR
 const unsigned long settleDelay  = 5000;  // 5 s before we start PIR checking
+
+//for refresh seat state in the mobile phone app, refresh rate is 6 seconds for now (may change later on if required))
+unsigned long lastPublishTime = 0;  // track last periodic publish
+const unsigned long publishInterval = 6000; // constant 6 seconds for now, badme dekh lange according to need
 
 // Seat release timeout
 unsigned long leaveStart = 0;
@@ -67,6 +71,7 @@ void setup() {
 
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   reconnectMQTT();
+  // In your setup() function
 }
 
 // ---------- Main Loop ----------
@@ -156,6 +161,36 @@ void loop() {
       delay(checkInt);
       break;
     }
+    //here i wanna publish the status in every 6 seconds interval {Available, Occupied_human, Occupied_object}
+    if (now - lastPublishTime >= publishInterval) {
+      lastPublishTime = now;
+
+   // Publish the current state code again every 6 seconds for refreshing app, 
+   //Refresh Rate = 1 publish / 6 seconds
+   //or equivalently
+   //0.1667 Hz (approx)
+   
+   switch (state) {
+      case IDLE:
+       mqttClient.publish(MQTT_TOPIC, "0");
+       Serial.println("[Periodic] Status refreshed: IDLE (0)");
+       break;
+
+      case OCCUPIED_HUMAN:
+       mqttClient.publish(MQTT_TOPIC, "1");
+       Serial.println("[Periodic] Status refreshed: OCCUPIED_HUMAN (1)");
+       break;
+
+      case OCCUPIED_OBJECT:
+       mqttClient.publish(MQTT_TOPIC, "2");
+       Serial.println("[Periodic] Status refreshed: OCCUPIED_OBJECT (2)");
+       break;
+     
+//      default:
+//      // Optional: if ever add new states, handle them here
+//      break;
+    }
+   }
   }
 }
 
@@ -176,10 +211,10 @@ float measureDistance() {
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
 
-    long dur = pulseIn(ECHO_PIN, HIGH, 25000);
+    long dur = pulseIn(ECHO_PIN, HIGH, 25000);//ye bhul gaya kya tha, samaj lena dubara later
     float dist = dur * 0.0343f / 2.0f;
 
-    if (dur > 0 && dist >= 2.0 && dist <= 200.0)
+    if (dur > 0)// && dist >= 2.0 && dist <= 200.0
       validReadings[count++] = dist;
 
     delay(10);
@@ -210,6 +245,7 @@ void reconnectMQTT() {
     String clientId = "ESP32Client_" + String(ESP.getEfuseMac(), HEX);
     if (mqttClient.connect(clientId.c_str())) {
       Serial.println("MQTT connected");
+
     } else {
       Serial.print("MQTT fail, rc=");
       Serial.print(mqttClient.state());
