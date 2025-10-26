@@ -150,8 +150,8 @@ void loop() {
       display.showNumberDec((int)d, false);
       setLED(255, 0, 0); // red
       delay(1000);
-      mqttClient.publish(MQTT_TOPIC,"1");
-      Serial.println("sending 0");
+      mqttClient.publish(MQTT_TOPIC,"2");
+      Serial.println("sending 2");
       delay(500);
       if (d >= 40.0) {
         if (leaveStart == 0) leaveStart = now;
