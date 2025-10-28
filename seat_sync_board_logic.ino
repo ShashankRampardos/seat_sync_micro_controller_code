@@ -31,13 +31,72 @@ enum State {
   OCCUPIED_HUMAN,
   OCCUPIED_OBJECT
 };
-State state = IDLE;
+State state = State :: IDLE;
+
+class Color {
+public:
+    int r, g, b;
+
+    Color(int red, int green, int blue) : r(red), g(green), b(blue) {}
+
+    std::string toString() const {
+        return "(" + std::to_string(r) + ", "
+                   + std::to_string(g) + ", "
+                   + std::to_string(b) + ")";
+    }
+};
+
+// Enum for seat statuses
+enum class SeatStatus {
+    AVAILABLE,               // 0 Seat Available
+    OCCUPIED,                // 1 Seat Occupied
+    ON_HOLD,                 // 2 Seat Occupied but Put on Hold by Someone
+    UNAUTHORIZED_OCCUPIED,   // 3 Unauthorized Seat Occupied
+    BOOKING_IN_PROGRESS,     // 4 Seat Booking in Progress (OTP Displayed)
+    RESERVED,                // 5 Reserved Seat
+    BLOCKED,                 // 6 Blocked Seat (Damaged/Sensor Fault)
+    OCCUPIED_BY_OBJECT       // 7 Seat Occupied by Object (not human)
+};
+
+// Get seat label
+std::string getSeatLabel(SeatStatus status) {
+    switch (status) {
+        case SeatStatus::AVAILABLE:             return "Seat Available";
+        case SeatStatus::OCCUPIED:              return "Seat Occupied";
+        case SeatStatus::ON_HOLD:               return "On Hold";
+        case SeatStatus::UNAUTHORIZED_OCCUPIED: return "Unauthorized Occupied";
+        case SeatStatus::BOOKING_IN_PROGRESS:   return "Booking in Progress";
+        case SeatStatus::RESERVED:              return "Reserved Seat";
+        case SeatStatus::BLOCKED:               return "Blocked Seat";
+        case SeatStatus::OCCUPIED_BY_OBJECT:    return "Occupied by Object";
+        default:                                return "Unknown";
+    }
+}
+
+// Get seat color in RGB
+Color getSeatColor(SeatStatus status) {
+    switch (status) {
+        case SeatStatus::AVAILABLE:             return Color(100, 255, 100);  // light green
+        case SeatStatus::OCCUPIED:              return Color(255, 0, 0);      // red
+        case SeatStatus::ON_HOLD:               return Color(0, 128, 255);    // blue
+        case SeatStatus::UNAUTHORIZED_OCCUPIED: return Color(255, 64, 128);   // pink/red
+        case SeatStatus::BOOKING_IN_PROGRESS:   return Color(128, 0, 255);    // purple
+        case SeatStatus::RESERVED:              return Color(255, 255, 0);    // yellow
+        case SeatStatus::BLOCKED:               return Color(64, 64, 64);     // grey
+        case SeatStatus::OCCUPIED_BY_OBJECT:    return Color(255, 140, 0);    // orange
+        default:                                return Color(255, 255, 255);  // white fallback
+    }
+}
+
+SeatStatus status = SeatStatus :: AVAILABLE;
+std :: string uid = "null";
 
 // Timing
 unsigned long stateStart = 0;
 const unsigned long checkInt     = 500;   // ultrasonic check interval
 const unsigned long motionWin    = 10000; // 10 s window for PIR
 const unsigned long settleDelay  = 5000;  // 5 s before we start PIR checking
+unsigned long motionCount = 2;
 
 //for refresh seat state in the mobile phone app, refresh rate is 6 seconds for now (may change later on if required))
 unsigned long lastPublishTime = 0;  // track last periodic publish
@@ -96,23 +155,26 @@ void loop() {
       break;
     }
 
-    case MOTION_CHECK: {
-      unsigned long elapsed = now - stateStart;
+    case MOTION_CHECK: {//do nothing for 5 seconds, and after 5 seconds start pir checking
+      unsigned long elapsed = now - stateStart;//time passed in motion check state
 
-      if (elapsed < settleDelay) {
+      if (elapsed < settleDelay) {//for 5 seconds motion check nahi hoga
         setLED(150, 150, 200);
-        display.showNumberDec(0, false);
+        display.showNumberDec(0, false);// show 0 on 4 digit seven segment
         delay(50);
         break;
       }
 
-      unsigned long pirElapsed = elapsed - settleDelay;
+      unsigned long pirElapsed = elapsed - settleDelay;//time passing after 5 second motion delay
       setLED(150, 150, 200);
 
-      if (digitalRead(PIR_PIN) == HIGH && pirElapsed <= motionWin) {
+      if (digitalRead(PIR_PIN) == HIGH && pirElapsed <= motionWin) {//10 second motion check delay
+        motionCount--;
+      }else if(motionCount == 0){
         state = OCCUPIED_HUMAN;
         mqttClient.publish(MQTT_TOPIC, "1"); // 1 = human detected
         Serial.println("PIR → HUMAN");
+        motionCount = 2;
       } else if (pirElapsed > motionWin) {
         state = OCCUPIED_OBJECT;
         mqttClient.publish(MQTT_TOPIC, "2"); // no human
