@@ -2,6 +2,8 @@
 #include <PubSubClient.h>
 #include <esp32-hal-ledc.h>
 #include <TM1637Display.h>
+#include <ArduinoJson.h>
+
 
 // Pin Definitions
 #define TRIG_PIN    18
@@ -24,7 +26,7 @@ const int   MQTT_PORT   = 1883;
 //mqtt topics, some are for subscribe and listen and some are for publishing 
 const char* MQTT_TOPIC  = "seat/1/status";//for publishing seat status {0,1,2}
 char* colorListenTopic = "seat/1/color";      // "255,0,0"
-char* statusListenTopic = "seat/1/status";     // "3"
+
 char* occupancyDurationListenTopic = "seat/1/occupancy";  // "60"   (in minutes maybe)
 char* seatHoldDurationListenTopic = "seat/1/hold";       // "5"    (short break duration)
 char* otpRequestTopic = "seat/1/otp_request";//listen to otp request and get user uid
@@ -55,9 +57,22 @@ enum SeatStatus {
   OCCUPIED_BY_OBJECT
 };
 
+// State machine
+enum State {
+  IDLE,
+  MOTION_CHECK,
+  OCCUPIED_HUMAN,
+  OCCUPIED_OBJECT,
+  DO_NOTHING
+};
+State state = State :: IDLE;
+
+
 String currentOTP = "";
 unsigned long otpGeneratedAt = 0;
+unsigned long holdStartedAt = 0;
 
+unsigned long holdTime = LLONG_MAX;
 String requestedBy = "null";
 bool otpRequested = false;
 SeatStatus status = AVAILABLE;
@@ -108,6 +123,50 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
       setLED(c.r,c.g,c.b);
       mqttClient.publish(MQTT_TOPIC,"4");//booling in progress
       Serial.println("OTP Generated and Published: " + currentOTP);
+    }
+  } else if(incomingTopic == "seat/1/hold") {
+    Serial.print("Message arrived on topic: ");
+    Serial.println(topic);
+  
+    // Convert payload to Arduino core String
+    String message;
+    for (int i = 0; i < length; i++) {
+      message += (char)payload[i];
+    }
+  
+    Serial.print("Payload: ");
+    Serial.println(message);
+  
+    // === Parse JSON ===
+    StaticJsonDocument<200> doc;  // size in bytes, adjust if message is large
+    DeserializationError error = deserializeJson(doc, message);
+  
+    if (error) {
+      Serial.print("JSON parse error: ");
+      Serial.println(error.c_str());
+      return;
+    }
+  
+    // Access JSON fields
+    String uid = doc["uid"];  // user uid
+    unsigned long duration = doc["duration"];  // duration time in milli seconds
+  
+    Serial.println("Parsed values:");
+    Serial.println(uid);
+    Serial.println(duration);
+  
+    if(requestedBy == uid) {
+       holdTime = duration;
+       status = ON_HOLD;
+       state = IDLE;
+       holdStartedAt = millis();
+       mqttClient.publish(seatHoldDurationListenTopic,"0");//successful hold attempt
+       mqttClient.publish(MQTT_TOPIC,"2");
+    } else if (duration == 0 && requestedBy == uid) {// hold stop signal
+       holdTime = 0;
+    } else {
+      mqttClient.publish(seatHoldDurationListenTopic,"-1");// -1 for invalid hold attempt, hold failed
+      holdTime = LLONG_MAX;
     }
   }
 }
@@ -167,6 +226,8 @@ void reconnectMQTT() {
 
       // Subscribe to OTP request topic
       mqttClient.subscribe(otpRequestTopic);
+      //subscribe to hold topic 
+      mqttClient.subscribe(seatHoldDurationListenTopic);
       Serial.println("Subscribed to OTP Request Topic: " + String(otpRequestTopic));
     } else {
       Serial.print("MQTT fail, rc=");
@@ -175,16 +236,6 @@ void reconnectMQTT() {
     }
   }
 }
-
-
-// State machine
-enum State {
-  IDLE,
-  MOTION_CHECK,
-  OCCUPIED_HUMAN,
-  OCCUPIED_OBJECT
-};
-State state = State :: IDLE;
 
 
 // Get seat label
@@ -206,9 +257,9 @@ String getSeatLabel(SeatStatus status) {
 Color getSeatColor(SeatStatus status) {
     switch (status) {
         case AVAILABLE:             return Color(100, 255, 100);  // light green
-        case OCCUPIED:              return Color(255, 0, 0);      // red
+        case OCCUPIED:              return Color(0, 255, 0);      // green
         case ON_HOLD:               return Color(0, 128, 255);    // blue
-        case UNAUTHORIZED_OCCUPIED: return Color(255, 64, 128);   // pink/red
+        case UNAUTHORIZED_OCCUPIED: return Color(255, 0, 0);   // red
         case BOOKING_IN_PROGRESS:   return Color(128, 0, 255);    // purple
         case RESERVED:              return Color(255, 255, 0);    // yellow
         case BLOCKED:               return Color(64, 64, 64);     // grey
@@ -263,20 +314,34 @@ void setup() {
   //randomSeed(esp_random());
 }
 
+unsigned long reservedAt = 0;
 // ---------- Main Loop ----------
 void loop() {
   if (!mqttClient.connected()) reconnectMQTT();
+ 
   mqttClient.loop();
 
-  if (currentOTP != "" && millis() - otpGeneratedAt > 60000) {
+  if ((currentOTP != "" && millis() - otpGeneratedAt > 60000) || status == OCCUPIED) {
     currentOTP = "";
     display.clear();
     mqttClient.publish(otpResponseTopic,"null");
     Serial.println("OTP expired");
-    //requestedBy = "null";
+    if(status == BOOKING_IN_PROGRESS){
+      status = AVAILABLE;
+    }
+    if(state != OCCUPIED_HUMAN){
+      requestedBy = "null";
+    }
   }
   
-
+  if(holdTime != LLONG_MAX && millis() - holdStartedAt > holdTime) {
+    state = IDLE;
+    status = RESERVED;// until user sits
+    reservedAt = millis();
+  }
+  if(millis() - reservedAt > 10000) {
+    status = AVAILABLE;
+  }
   unsigned long now = millis();
 
   switch (state) {
@@ -319,20 +384,26 @@ void loop() {
       }else if(motionCount == 0){
         state = OCCUPIED_HUMAN;
         
-        if(requestedBy == "null" || requestedBy == "guest"){
+        if(requestedBy == "null" || requestedBy == "guest" || status == ON_HOLD){
           status = UNAUTHORIZED_OCCUPIED;
           mqttClient.publish(MQTT_TOPIC, "3"); // 3 = unauthorized human detected
           Serial.println("PIR → unauthorized HUMAN");
         }else{
+          if(status == ON_HOLD){
+           mqttClient.publish(MQTT_TOPIC,"2");// on hold
+          } else {
           status = OCCUPIED;
           mqttClient.publish(MQTT_TOPIC,"1");
+          }
           Color c = getSeatColor(status);
           setLED(c.r,c.g,c.b);
         }
         motionCount = 3;
       } else if (pirElapsed > motionWin) {
         state = OCCUPIED_OBJECT;
-        status = OCCUPIED_BY_OBJECT;
+        if(status != ON_HOLD)
+         status = OCCUPIED_BY_OBJECT;
+
         mqttClient.publish(MQTT_TOPIC, "7"); // object detected
         Serial.println("NO PIR → OBJECT");
       }
@@ -346,7 +417,7 @@ void loop() {
       Serial.print((int)d);
       //setLED(0, 255, 0); // green
       //delay(1000);
-      if(requestedBy == "null" || requestedBy == "guest"){
+      if(requestedBy == "null" || requestedBy == "guest" || status == UNAURTHORZED_OCCUPIED){
         status = UNAUTHORIZED_OCCUPIED;
         mqttClient.publish(MQTT_TOPIC,"3");
         Serial.println("sending 3");
@@ -355,18 +426,25 @@ void loop() {
         mqttClient.publish(MQTT_TOPIC,"1");
         Serial.println("sending 1");
       }
-      delay(500);
+      delay(100);
       if (d >= 24.0) {
         if (leaveStart == 0) leaveStart = now;
         else if (now - leaveStart >= leaveTimeout) {
+          if(holdDuration != LLONGMAX){
+           state = IDLE;//unauthorized person gone
+           status = ON_HOLD;
+           mqttClient.publish(MQTT_TOPIC, "2");
+          } else {
           state = IDLE;
           status = AVAILABLE;
           leaveStart = 0;
-          Color c = getSeatColor(OCCUPIED_BY_OBJECT);
+          Color c = getSeatColor(AVAILABLE);
           setLED(c.r,c.g,c.b);
           Serial.println("← IDLE (human left)");
           mqttClient.publish(MQTT_TOPIC, "0");
           Serial.println("seat released status published");
+          requestedBy = "null";
+          }
         }
       } else leaveStart = 0;
 
@@ -379,14 +457,15 @@ void loop() {
       Serial.print((int)d);
       Color c = getSeatColor(OCCUPIED_BY_OBJECT);
       setLED(c.r,c.g,c.b);
-      delay(1000);
+      //delay(1000);
       mqttClient.publish(MQTT_TOPIC,"7");
       Serial.println("sending 7");
-      delay(500);
-      if (d >= 40.0) {
+      delay(100);
+      if (d >= 24.0) {
         if (leaveStart == 0) leaveStart = now;
         else if (now - leaveStart >= leaveTimeout) {
           state = IDLE;
+          status = AVAILABLE;
           leaveStart = 0;
           Serial.println("← IDLE (object removed)");
           mqttClient.publish(MQTT_TOPIC, "0");//idle state code is 0
@@ -394,7 +473,7 @@ void loop() {
         }
       } else leaveStart = 0;
 
-      delay(checkInt);
+      //delay(checkInt);//1500 milli second delay
       break;
     }
     default: {
@@ -403,6 +482,6 @@ void loop() {
   }
   Color c = getSeatColor(status);
   setLED(c.r,c.g,c.b);
-  delay(checkInt);//1.5 second delay
+  delay(checkInt);//1500 milli seconds delay
 }
 
