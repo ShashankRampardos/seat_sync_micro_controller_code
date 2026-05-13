@@ -49,6 +49,7 @@ const char* occupancyDurationListenTopic = "seat/1/occupancy";
 const char* seatHoldDurationListenTopic = "seat/1/hold";
 const char* otpRequestTopic = "seat/1/otp_request";
 const char* otpResponseTopic = "seat/1/otp";
+const char* wifiCredentialsUpdateTopic = "seat/all/admin/wifi/update";
 
 // ----------------------- OBJECTS -----------------------
 WiFiClient wifiClient;
@@ -113,7 +114,7 @@ const unsigned long leaveTimeout = 5000UL;
 // Moved this UP here so 'ensureMqttConnected' can see it
 unsigned long lastMqttAttempt = 0; 
 
-// ----------------------- FUNCTION DECLARATIONS -----------------------
+// -------------- FUNCTION DECLARATIONS -----------------------
 float measureDistance();
 void setLED(int r, int g, int b);
 Color getSeatColor(SeatStatus s);
@@ -124,7 +125,7 @@ void handleHoldMessage(const String &payload);
 void uploadLogToFirestore(String uid, long durationSec, time_t startTime);
 String getISOTime(time_t epoch);
 
-// ----------------------- FIREBASE HELPER -----------------------
+// ----------------------- FIREBASE HELPER ---------------
 // Helper to format time as ISO8601 for Firestore Timestamp
 String getISOTime(time_t epoch) {
   struct tm timeinfo;
@@ -187,6 +188,9 @@ void mqttCallback(char* topic, byte* message, unsigned int length) {
     // handle hold JSON { "uid":"...", "duration": <seconds> }
     handleHoldMessage(payload);
   }
+  else if (incomingTopic == String(wifiCredentialsUpdateTopic)) {
+    handleWifiUpdate(payload);
+  }
 }
 
 // ----------------------- LOGIC HANDLERS -----------------------
@@ -221,6 +225,80 @@ void handleOtpRequest(const String &uid) {
 
   mqttClient.publish(MQTT_TOPIC, "4"); // booking-in-progress code
   Serial.println("[OTP] Generated & published: " + currentOTP);
+}
+
+//--------------- update wifi credentials -----------
+
+void handleWifiUpdate(const String &payload) {
+  Serial.println("[WIFI] Update request received");
+
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, payload);
+
+  if (err) {
+    Serial.println("[WIFI] JSON parse error");
+    return;
+  }
+
+  // NO DECRYPTION (for now)
+  String data = doc["data"];   // "SSID|PASSWORD"
+
+  int sepIndex = data.indexOf('|');
+  if (sepIndex == -1) {
+    Serial.println("[WIFI] Invalid format");
+    return;
+  }
+
+  String newSSID = data.substring(0, sepIndex);
+  String newPASS = data.substring(sepIndex + 1);
+
+  Serial.println("[WIFI] New SSID: " + newSSID);
+
+  delay(random(1000, 4000)); // avoid all switching together
+
+  reconnectWiFi(newSSID, newPASS);
+}
+
+void reconnectWiFi(String ssid, String pass) {
+  Serial.println("[WIFI] Reconnecting...");
+
+  WiFi.disconnect(true, true); // full reset
+  delay(1500);
+
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WIFI] Reconnected NEW: " + WiFi.localIP().toString());
+    mqttClient.disconnect();
+    return;
+  }
+
+  // failed → fallback
+  Serial.println("\n[WIFI] New WiFi failed, trying old...");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  retries = 0; // reuse same variable (no shadowing)
+
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WIFI] Recovered OLD WiFi: " + WiFi.localIP().toString());
+    mqttClient.disconnect();
+  } else {
+    Serial.println("\n[WIFI] TOTAL FAILURE (no wifi)");
+  }
 }
 
 //---------------hold handler -------------
@@ -334,6 +412,7 @@ void ensureMqttConnected() {
         mqttClient.subscribe(occupancyDurationListenTopic);
         mqttClient.subscribe(colorListenTopic);
         mqttClient.subscribe(seatHoldDurationListenTopic);
+        mqttClient.subscribe(wifiCredentialsUpdateTopic);
         mqttClient.publish(MQTT_TOPIC, "0");
      }
   }
